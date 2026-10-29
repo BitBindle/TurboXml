@@ -677,6 +677,7 @@ internal ref struct XmlParserInternal
                     XmlThrowHelper.ThrowInvalidXml(XmlThrow.InvalidEndTagName, line, column);
 
                 _stream.Advance(Vector256<ushort>.Count);
+                _column += Vector256<ushort>.Count;
                 i += Vector256<ushort>.Count;
                 length -= Vector256<ushort>.Count;
             }

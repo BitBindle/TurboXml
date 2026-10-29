@@ -396,6 +396,31 @@ public class XmlRuntimeTests
     }
 
     [TestMethod]
+    public void TestColumnAfterLongEndTag()
+    {
+        // A name of 40 characters goes through the vectorized end tag comparison
+        var name = new string('n', 40);
+        var xml = $"<a><{name}></{name}><b/></a>";
+        var expecting = $"""
+                         BeginTag(1:2): a
+                         BeginTag(1:5): {name}
+                         EndTag(1:48): {name}
+                         BeginTag(1:90): b
+                         EndTagEmpty
+                         EndTag(1:95): a
+                         """;
+        expecting = NormalizeNewLines(expecting);
+
+        var handler = new XmlReadPrintHandler() { Writer = new StringWriter() };
+        XmlParser.Parse(xml, ref handler);
+        Assert.AreEqual(expecting, NormalizeNewLines(handler.Writer.ToString()!));
+
+        handler.Writer = new StringWriter();
+        XmlParser.Parse(new MemoryStream(Encoding.UTF8.GetBytes(xml)), ref handler);
+        Assert.AreEqual(expecting, NormalizeNewLines(handler.Writer.ToString()!));
+    }
+
+    [TestMethod]
     public void TestInvalidCharacterInContent()
     {
         var handler = new XmlReadPrintHandler() { Writer = new StringWriter() };
