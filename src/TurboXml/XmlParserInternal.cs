@@ -105,7 +105,8 @@ internal ref struct XmlParserInternal
                 }
             }
 
-            if (!TryReadNext(out var c))
+            char c = default;
+            if (!TryReadNext(ref c))
             {
                 break;
             }
@@ -177,7 +178,7 @@ internal ref struct XmlParserInternal
                     _isInProlog = false;
                     AppendContent(c);
 
-                    if (!TryReadNext(out c))
+                    if (!TryReadNext(ref c))
                     {
                         goto EndOfStream;
                     }
@@ -190,7 +191,7 @@ internal ref struct XmlParserInternal
                     do
                     {
                         AppendContent(c);
-                        if (!TryReadNext(out c))
+                        if (!TryReadNext(ref c))
                         {
                             goto EndOfStream;
                         }
@@ -217,7 +218,7 @@ internal ref struct XmlParserInternal
                     _line++;
                     _column = -1;
 
-                    if (!TryReadNext(out c))
+                    if (!TryReadNext(ref c))
                     {
                         goto EndOfStream;
                     }
@@ -292,7 +293,7 @@ internal ref struct XmlParserInternal
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ReadOnlySpan<char> GetTextSpan(int index)
     {
-        return MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buffer), index), _length - index);
+        return _buffer.AsSpan(index, _length - index);
     }
 
     private void ParseBeginTag(char c)
@@ -388,7 +389,7 @@ internal ref struct XmlParserInternal
             }
         }
 
-        while (TryReadNext(out c))
+        while (TryReadNext(ref c))
         {
             if (XmlChar.IsNameChar(c))
             {
@@ -577,7 +578,7 @@ internal ref struct XmlParserInternal
                 if (!XmlChar.TryGetHexDigit(c, out charCodePoint))
                     ThrowInvalidXml(XmlThrow.InvalidHexDigit);
 
-                while (TryReadNext(out c))
+                while (TryReadNext(ref c))
                 {
                     if (XmlChar.TryGetHexDigit(c, out int newValue))
                     {
@@ -597,7 +598,7 @@ internal ref struct XmlParserInternal
                 if ((uint)charCodePoint > 9)
                     ThrowInvalidXml(XmlThrow.InvalidDigit);
 
-                while (TryReadNext(out c))
+                while (TryReadNext(ref c))
                 {
                     var d = c - '0';
                     if ((uint)d <= 9)
@@ -613,10 +614,10 @@ internal ref struct XmlParserInternal
                 }
             }
 
-            if (!Rune.IsValid(charCodePoint))
+            if (!Rune.TryCreate(charCodePoint, out var rune))
                 XmlThrowHelper.ThrowInvalidXml(XmlThrow.InvalidCharacterFound, line, column);
 
-            AppendValidRune(Unsafe.BitCast<int, Rune>(charCodePoint));
+            AppendValidRune(rune);
 
             if (c != ';')
                 ThrowInvalidXml(XmlThrow.InvalidCharacterFoundExpectingSemiComma);
@@ -633,27 +634,27 @@ internal ref struct XmlParserInternal
         switch (c)
         {
             case 'l':
-                if (TryReadNext(out c) && c == 't')
+                if (TryReadNext(ref c) && c == 't')
                 {
                     rc = '<';
                 }
 
                 break;
             case 'g':
-                if (TryReadNext(out c) && c == 't')
+                if (TryReadNext(ref c) && c == 't')
                 {
                     rc = '>';
                 }
 
                 break;
             case 'a':
-                if (TryReadNext(out c))
+                if (TryReadNext(ref c))
                 {
-                    if (c == 'm' && TryReadNext(out c) && c == 'p')
+                    if (c == 'm' && TryReadNext(ref c) && c == 'p')
                     {
                         rc = '&';
                     }
-                    else if (c == 'p' && TryReadNext(out c) && c == 'o' && TryReadNext(out c) && c == 's')
+                    else if (c == 'p' && TryReadNext(ref c) && c == 'o' && TryReadNext(ref c) && c == 's')
                     {
                         rc = '\'';
                     }
@@ -661,7 +662,7 @@ internal ref struct XmlParserInternal
 
                 break;
             case 'q':
-                if (TryReadNext(out c) & c == 'u' && TryReadNext(out c) && c == 'o' && TryReadNext(out c) && c == 't')
+                if (TryReadNext(ref c) & c == 'u' && TryReadNext(ref c) && c == 'o' && TryReadNext(ref c) && c == 't')
                 {
                     rc = '"';
                 }
@@ -739,33 +740,29 @@ internal ref struct XmlParserInternal
 
         var name = PopTagName();
 
-        nint i = 0;
-        var nameLength = name.Length;
-        ref var nameStart = ref MemoryMarshal.GetReference(name);
+        var remaining = name;
 
         // We check for Vector128 but we process with Vector256, as it can translate to use Vector128 behind the scene
         if (Vector128.IsHardwareAccelerated)
         {
-            var length = nameLength;
-            while (length >= Vector256<ushort>.Count && _stream.TryPreviewChar256(out var data))
+            while (remaining.Length >= Vector256<ushort>.Count && _stream.TryPreviewChar256(out var data))
             {
-                if (data != Unsafe.As<char, Vector256<ushort>>(ref Unsafe.Add(ref nameStart, i)))
+                if (data != Vector256.Create(MemoryMarshal.Cast<char, ushort>(remaining)))
                     XmlThrowHelper.ThrowInvalidXml(XmlThrow.InvalidEndTagName, line, column);
 
                 _stream.Advance(Vector256<ushort>.Count);
                 // A surrogate pair counts as one column
                 var lowSurrogates = Vector256.Equals(data & Vector256.Create((ushort)0xFC00), Vector256.Create((ushort)0xDC00));
                 _column += Vector256<ushort>.Count - BitOperations.PopCount(lowSurrogates.ExtractMostSignificantBits());
-                i += Vector256<ushort>.Count;
-                length -= Vector256<ushort>.Count;
+                remaining = remaining.Slice(Vector256<ushort>.Count);
             }
         }
 
         char c;
-        for (; i < name.Length; i++)
+        foreach (var expected in remaining)
         {
             c = ReadNext();
-            if (c != Unsafe.Add(ref nameStart, i))
+            if (c != expected)
                 XmlThrowHelper.ThrowInvalidXml(XmlThrow.InvalidEndTagName, line, column);
 
             // A surrogate pair counts as one column
@@ -1436,7 +1433,7 @@ internal ref struct XmlParserInternal
 
                     break;
                 case '\r':
-                    if (!TryReadNext(out c))
+                    if (!TryReadNext(ref c))
                         ThrowInvalidXml(XmlThrow.InvalidEndOfXMLStream);
 
                     _line++;
@@ -1584,16 +1581,18 @@ internal ref struct XmlParserInternal
 
     private bool HasElementsInStack => _lastNameStackIndex > 0;
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ReadOnlySpan<char> PopTagName()
     {
         var buffer = _buffer;
         var length = _length;
         Debug.Assert(length - 2 >= 0);
-        var nameLength = Unsafe.As<char, int>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(buffer), length - 2));
+        // The name length is stored as two characters, low 16 bits first (see AppendInt).
+        var nameLength = buffer[length - 2] | (buffer[length - 1] << 16);
         var lastNameIndex = length - nameLength - 2;
         _length = lastNameIndex;
         _lastNameStackIndex = lastNameIndex;
-        return MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(buffer), lastNameIndex), nameLength);
+        return new ReadOnlySpan<char>(buffer, lastNameIndex, nameLength);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -1613,14 +1612,22 @@ internal ref struct XmlParserInternal
         Debug.Assert(_sliceStart < 0);
         var charBuffer = _buffer;
         var charBufferLength = _length;
-        if (charBufferLength == charBuffer.Length)
+        if ((uint)charBufferLength < (uint)charBuffer.Length)
         {
-            Resize();
-            charBuffer = _buffer;
+            charBuffer[charBufferLength] = c;
+            _length = charBufferLength + 1;
         }
+        else
+        {
+            AppendCharacterAfterResize(c);
+        }
+    }
 
-        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(charBuffer), charBufferLength++) = c;
-        _length = charBufferLength;
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AppendCharacterAfterResize(char c)
+    {
+        Resize();
+        _buffer[_length++] = c;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1634,7 +1641,8 @@ internal ref struct XmlParserInternal
             buffer = _buffer;
         }
 
-        Unsafe.As<char, int>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(buffer), length)) = value;
+        buffer[length] = (char)value;
+        buffer[length + 1] = (char)(value >> 16);
         _length = length + 2;
     }
 
@@ -1660,13 +1668,23 @@ internal ref struct XmlParserInternal
         Debug.Assert(_sliceStart < 0);
         var charBuffer = _buffer;
         var charBufferLength = _length;
-        if (charBufferLength + Vector128<ushort>.Count > charBuffer.Length)
+        if (SpanRange.Fits(charBufferLength, Vector128<ushort>.Count, charBuffer.Length))
         {
-            Resize(Vector128<ushort>.Count);
-            charBuffer = _buffer;
+            span.CopyTo(MemoryMarshal.Cast<char, ushort>(charBuffer.AsSpan(charBufferLength, Vector128<ushort>.Count)));
+            _length = charBufferLength + Vector128<ushort>.Count;
         }
-        Unsafe.As<char, Vector128<ushort>>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(charBuffer), charBufferLength)) = span;
-        _length = charBufferLength + Vector128<ushort>.Count;
+        else
+        {
+            AppendCharactersAfterResize(span);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AppendCharactersAfterResize(Vector128<ushort> span)
+    {
+        Resize(Vector128<ushort>.Count);
+        span.CopyTo(MemoryMarshal.Cast<char, ushort>(_buffer.AsSpan(_length, Vector128<ushort>.Count)));
+        _length += Vector128<ushort>.Count;
     }
 
 
@@ -1676,13 +1694,23 @@ internal ref struct XmlParserInternal
         Debug.Assert(_sliceStart < 0);
         var charBuffer = _buffer;
         var charBufferLength = _length;
-        if (charBufferLength + Vector256<ushort>.Count > charBuffer.Length)
+        if (SpanRange.Fits(charBufferLength, Vector256<ushort>.Count, charBuffer.Length))
         {
-            Resize(Vector256<ushort>.Count);
-            charBuffer = _buffer;
+            span.CopyTo(MemoryMarshal.Cast<char, ushort>(charBuffer.AsSpan(charBufferLength, Vector256<ushort>.Count)));
+            _length = charBufferLength + Vector256<ushort>.Count;
         }
-        Unsafe.As<char, Vector256<ushort>>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(charBuffer), charBufferLength)) = span;
-        _length = charBufferLength + Vector256<ushort>.Count;
+        else
+        {
+            AppendCharactersAfterResize(span);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AppendCharactersAfterResize(Vector256<ushort> span)
+    {
+        Resize(Vector256<ushort>.Count);
+        span.CopyTo(MemoryMarshal.Cast<char, ushort>(_buffer.AsSpan(_length, Vector256<ushort>.Count)));
+        _length += Vector256<ushort>.Count;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1832,7 +1860,8 @@ internal ref struct XmlParserInternal
     {
         _column++;
 
-        if (!_stream.TryReadNext(out char c))
+        char c = default;
+        if (!_stream.TryReadNext(ref c))
             ThrowInvalidEndOfXmlStream();
         return c;
     }
@@ -1840,7 +1869,8 @@ internal ref struct XmlParserInternal
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private char ReadLowSurrogate()
     {
-        if (!_stream.TryReadNext(out char c))
+        char c = default;
+        if (!_stream.TryReadNext(ref c))
             ThrowInvalidEndOfXmlStream();
 
         if (!char.IsLowSurrogate(c))
@@ -1850,10 +1880,10 @@ internal ref struct XmlParserInternal
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool TryReadNext(out char c)
+    private bool TryReadNext(ref char c)
     {
         _column++;
-        return _stream.TryReadNext(out c);
+        return _stream.TryReadNext(ref c);
     }
 
     [DoesNotReturn]

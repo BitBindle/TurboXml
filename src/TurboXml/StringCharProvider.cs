@@ -16,7 +16,7 @@ namespace TurboXml;
 /// </summary>
 internal struct StringCharProvider : ICharProvider
 {
-    private nint _index = 0;
+    private int _index = 0;
     private readonly string _text;
 
     public StringCharProvider(string text)
@@ -25,18 +25,17 @@ internal struct StringCharProvider : ICharProvider
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryReadNext(out char c)
+    public bool TryReadNext(ref char c)
     {
         var index = _index;
         var text = _text;
         if ((uint)index < (uint)text.Length)
         {
-            c = Unsafe.Add(ref MemoryMarshal.GetReference(text.AsSpan()), index);
+            c = text[index];
             _index = index + 1;
             return true;
         }
 
-        Unsafe.SkipInit(out c);
         return false;
     }
 
@@ -45,13 +44,13 @@ internal struct StringCharProvider : ICharProvider
     {
         var text = _text;
         var index = _index;
-        if (index + Vector128<ushort>.Count <= text.Length)
+        if (SpanRange.Fits(index, Vector128<ushort>.Count, text.Length))
         {
-            data = Unsafe.As<char, Vector128<ushort>>(ref Unsafe.Add(ref MemoryMarshal.GetReference(text.AsSpan()), index));
+            data = Vector128.Create(MemoryMarshal.Cast<char, ushort>(text.AsSpan(index, Vector128<ushort>.Count)));
             return true;
         }
 
-        Unsafe.SkipInit(out data);
+        data = default;
         return false;
     }
 
@@ -59,13 +58,13 @@ internal struct StringCharProvider : ICharProvider
     {
         var text = _text;
         var index = _index;
-        if (index + Vector256<ushort>.Count <= text.Length)
+        if (SpanRange.Fits(index, Vector256<ushort>.Count, text.Length))
         {
-            data = Unsafe.As<char, Vector256<ushort>>(ref Unsafe.Add(ref MemoryMarshal.GetReference(text.AsSpan()), index));
+            data = Vector256.Create(MemoryMarshal.Cast<char, ushort>(text.AsSpan(index, Vector256<ushort>.Count)));
             return true;
         }
 
-        Unsafe.SkipInit(out data);
+        data = default;
         return false;
     }
 
