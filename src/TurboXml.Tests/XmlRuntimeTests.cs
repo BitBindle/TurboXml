@@ -894,6 +894,74 @@ public class XmlRuntimeTests
         }
     }
 
+    [TestMethod]
+    public void TestStringInputLongContentCopyAllocatesContentLength()
+    {
+        // After a reference or a line end, the parser copies the content. The copy must not grow by doubling.
+        // Each content is longer than the one before, so that no pooled buffer of an earlier parse fits it.
+        var cases = new[]
+        {
+            ("<a>x&amp;", "</a>"),
+            ("<a>x\r\n", "</a>"),
+            ("<a b=\"x&amp;", "\"/>"),
+            ("<a b='x\r\n", "'/>"),
+            ("<a><![CDATA[x\r\n", "]]></a>"),
+            ("<a><!--x\r\n", "--></a>"),
+        };
+
+        var length = 1 << 16;
+        foreach (var (start, end) in cases)
+        {
+            length = length * 2 + 1;
+            var xml = start + new string('x', length) + end;
+
+            // Compile the parser code first, so that the measure has only the allocations of the parse.
+            var handler = new EmptyHandler();
+            XmlParser.Parse(start + "x" + end, ref handler);
+
+            var allocated = GC.GetAllocatedBytesForCurrentThread();
+            XmlParser.Parse(xml, ref handler);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+
+            var contentBytes = (long)length * sizeof(char);
+            Assert.IsTrue(allocated < contentBytes * 5 / 4, $"{start}: the parse allocated {allocated} bytes for a content of {contentBytes} bytes.");
+
+            var spanHandler = new ContentSpanHandler(xml);
+            XmlParser.Parse(xml, spanHandler);
+            Assert.AreEqual(1, spanHandler.Events.Count(e => e.EndsWith(":copy", StringComparison.Ordinal)), start);
+            AssertSameContentAsStream(xml, spanHandler);
+        }
+    }
+
+    [TestMethod]
+    public void TestStringInputContentCopyDoesNotAllocateRestOfInput()
+    {
+        // The copy of a content gets a buffer for that content only, not for the rest of the input.
+        const int length = 1_000_000;
+        var name = new string('n', 1000);
+        var run = new string('x', length);
+        foreach (var xml in new[]
+        {
+            $"<a>x&amp;y</a><!--{run}-->",
+            // The name after the copied text grows the buffer, and the next text is long.
+            $"<a>x&amp;y<{name}>{run}</{name}></a>",
+        })
+        {
+            var handler = new EmptyHandler();
+            XmlParser.Parse(xml.Replace(run, "x"), ref handler);
+
+            var allocated = GC.GetAllocatedBytesForCurrentThread();
+            XmlParser.Parse(xml, ref handler);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+
+            Assert.IsTrue(allocated < length / 4, $"{xml[..20]}: the parse allocated {allocated} bytes.");
+        }
+    }
+
+    private struct EmptyHandler : IXmlReadHandler
+    {
+    }
+
     private static void AssertSameContentAsStream(string xml, ContentSpanHandler stringHandler)
     {
         var streamHandler = new ContentSpanHandler(xml);
