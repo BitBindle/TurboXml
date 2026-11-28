@@ -938,16 +938,24 @@ public class XmlRuntimeTests
     {
         // The copy of a content gets a buffer for that content only, not for the rest of the input.
         const int length = 1_000_000;
-        var xml = "<a>x&amp;y</a><!--" + new string('x', length) + "-->";
+        var name = new string('n', 1000);
+        var run = new string('x', length);
+        foreach (var xml in new[]
+        {
+            $"<a>x&amp;y</a><!--{run}-->",
+            // The name after the copied text grows the buffer, and the next text is long.
+            $"<a>x&amp;y<{name}>{run}</{name}></a>",
+        })
+        {
+            var handler = new EmptyHandler();
+            XmlParser.Parse(xml.Replace(run, "x"), ref handler);
 
-        var handler = new EmptyHandler();
-        XmlParser.Parse("<a>x&amp;y</a><!--x-->", ref handler);
+            var allocated = GC.GetAllocatedBytesForCurrentThread();
+            XmlParser.Parse(xml, ref handler);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
 
-        var allocated = GC.GetAllocatedBytesForCurrentThread();
-        XmlParser.Parse(xml, ref handler);
-        allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
-
-        Assert.IsTrue(allocated < length / 4, $"The parse allocated {allocated} bytes.");
+            Assert.IsTrue(allocated < length / 4, $"{xml[..20]}: the parse allocated {allocated} bytes.");
+        }
     }
 
     private struct EmptyHandler : IXmlReadHandler
