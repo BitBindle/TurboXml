@@ -36,19 +36,25 @@ internal ref struct XmlParserInternal
     private readonly bool _ignoreDtd;
 
     private char[] _buffer;
+    private bool _bufferIsPooled;
     private int _length;
     private int _lastNameStackIndex;
 
     // For a string input, the content in progress is the slice of the input at _sliceStart, until a character differs from the input.
     private int _sliceStart;
     private int _sliceLength;
+    private string _contentEnd;
+    // For a string input, the text that ends the content that the buffer copies now, else null.
+    private string? _copyEnd;
 
     public XmlParserInternal(ref THandler handler, ref TCharProvider stream, XmlParserOptions options)
     {
         _handler = ref handler;
         _stream = ref stream;
         _buffer = ArrayPool<char>.Shared.Rent(128);
+        _bufferIsPooled = true;
         _sliceStart = -1;
+        _contentEnd = "<";
         _column = -1;
         _isInProlog = true;
         _ignoreDtd = options.IgnoreDtd;
@@ -58,7 +64,11 @@ internal ref struct XmlParserInternal
     {
         if (_buffer != null)
         {
-            ArrayPool<char>.Shared.Return(_buffer);
+            if (_bufferIsPooled)
+            {
+                ArrayPool<char>.Shared.Return(_buffer);
+            }
+
             _buffer = null!;
         }
     }
@@ -77,7 +87,7 @@ internal ref struct XmlParserInternal
 
     private void ParseImpl()
     {
-        StartContent();
+        StartContent("<");
         while (true)
         {
             if (Vector128.IsHardwareAccelerated)
@@ -160,7 +170,7 @@ internal ref struct XmlParserInternal
 
                     _contentLine = _line;
                     _contentColumn = _column + 1;
-                    StartContent();
+                    StartContent("<");
 
                     break;
                 case '&':
@@ -431,7 +441,7 @@ internal ref struct XmlParserInternal
 
         var startChar = c;
         int startIndex = _length;
-        StartContent();
+        StartContent(startChar == '"' ? "\"" : "'");
 
         if (Vector256.IsHardwareAccelerated)
         {
@@ -1140,7 +1150,7 @@ internal ref struct XmlParserInternal
 
         int startLine = _line;
         int startColumn = _column + 1;
-        StartContent();
+        StartContent("]]>");
 
         while (true)
         {
@@ -1247,7 +1257,7 @@ internal ref struct XmlParserInternal
 
         int startLine = _line;
         int startColumn = _column + 1;
-        StartContent();
+        StartContent("-->");
 
         while (true)
         {
@@ -1380,7 +1390,7 @@ internal ref struct XmlParserInternal
         if (reportInstruction)
         {
             // The data starts at the character that the caller already read.
-            StartContent(1);
+            StartContent("?>", 1);
         }
 
         if (c == '?')
@@ -1601,8 +1611,57 @@ internal ref struct XmlParserInternal
         var length = _length;
         var newBuffer = ArrayPool<char>.Shared.Rent(Math.Max(buffer.Length * 2, buffer.Length + minSizeAdd));
         Array.Copy(buffer, newBuffer, length);
-        ArrayPool<char>.Shared.Return(buffer);
+        if (_bufferIsPooled)
+        {
+            ArrayPool<char>.Shared.Return(buffer);
+        }
+
         _buffer = newBuffer;
+        _bufferIsPooled = true;
+    }
+
+    /// <summary>
+    /// Makes the buffer hold <paramref name="minSizeAdd"/> more characters.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Grow(int minSizeAdd)
+    {
+        if (_copyEnd is null || !_stream.TryGetText(out var text, out var index))
+        {
+            Resize(minSizeAdd);
+            return;
+        }
+
+        // The buffer copies a content of a string input. A reference or a normalized line end is never longer
+        // in the content than in the input, so the rest of the input up to the end of the content gives the length to reserve.
+        // A few characters that the parser already read can still wait to be appended, for example the low surrogate of a character reference.
+        const int readNotAppended = 16;
+        var input = text.AsSpan(index);
+        var restLength = input.IndexOf(_copyEnd.AsSpan());
+        if (restLength < 0)
+        {
+            restLength = input.Length;
+        }
+
+        var capacity = (long)_length + minSizeAdd + restLength + readNotAppended;
+        var buffer = _buffer;
+        if ((capacity <= buffer.Length * 2L && _bufferIsPooled) || capacity > Array.MaxLength)
+        {
+            Resize(minSizeAdd);
+            return;
+        }
+
+        // A pooled array has a length that is a power of two, which can be almost twice the capacity.
+        // So when doubling is not enough, allocate the exact length. Such a buffer does not go back to the pool.
+        var newBuffer = GC.AllocateUninitializedArray<char>((int)capacity);
+        Array.Copy(buffer, newBuffer, _length);
+        if (_bufferIsPooled)
+        {
+            ArrayPool<char>.Shared.Return(buffer);
+        }
+
+        _buffer = newBuffer;
+        _bufferIsPooled = false;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1613,7 +1672,7 @@ internal ref struct XmlParserInternal
         var charBufferLength = _length;
         if (charBufferLength == charBuffer.Length)
         {
-            Resize();
+            Grow(1);
             charBuffer = _buffer;
         }
 
@@ -1660,7 +1719,7 @@ internal ref struct XmlParserInternal
         var charBufferLength = _length;
         if (charBufferLength + Vector128<ushort>.Count > charBuffer.Length)
         {
-            Resize(Vector128<ushort>.Count);
+            Grow(Vector128<ushort>.Count);
             charBuffer = _buffer;
         }
         Unsafe.As<char, Vector128<ushort>>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(charBuffer), charBufferLength)) = span;
@@ -1676,7 +1735,7 @@ internal ref struct XmlParserInternal
         var charBufferLength = _length;
         if (charBufferLength + Vector256<ushort>.Count > charBuffer.Length)
         {
-            Resize(Vector256<ushort>.Count);
+            Grow(Vector256<ushort>.Count);
             charBuffer = _buffer;
         }
         Unsafe.As<char, Vector256<ushort>>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(charBuffer), charBufferLength)) = span;
@@ -1688,6 +1747,7 @@ internal ref struct XmlParserInternal
     {
         _length = _lastNameStackIndex;
         _sliceStart = -1;
+        _copyEnd = null;
     }
 
     private void FlushCharacterBuffer()
@@ -1710,20 +1770,24 @@ internal ref struct XmlParserInternal
             _handler.OnText(new ReadOnlySpan<char>(_buffer, lastNameStackIndex, length), _contentLine, _contentColumn);
             _length = lastNameStackIndex;
         }
+
+        _copyEnd = null;
     }
 
     /// <summary>
     /// Starts a content (text, CDATA, comment, attribute value or processing instruction data) at the next character to read,
     /// or <paramref name="charsBack"/> characters before it. For a string input, the content stays a slice of the input
     /// until <see cref="AppendContent(char)"/> gets a character that differs from the input.
+    /// <paramref name="end"/> is the text that ends the content in the input.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void StartContent(int charsBack = 0)
+    private void StartContent(string end, int charsBack = 0)
     {
         if (_stream.TryGetText(out _, out var index))
         {
             _sliceStart = index - charsBack;
             _sliceLength = 0;
+            _contentEnd = end;
         }
     }
 
@@ -1785,9 +1849,10 @@ internal ref struct XmlParserInternal
     {
         var slice = text.AsSpan(_sliceStart, _sliceLength);
         _sliceStart = -1;
+        _copyEnd = _contentEnd;
         if (_length + slice.Length > _buffer.Length)
         {
-            Resize(slice.Length);
+            Grow(slice.Length);
         }
 
         slice.CopyTo(_buffer.AsSpan(_length));
@@ -1800,6 +1865,7 @@ internal ref struct XmlParserInternal
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ReadOnlySpan<char> GetContentSpan(int index)
     {
+        _copyEnd = null;
         if (_stream.TryGetText(out var text, out _) && _sliceStart >= 0)
         {
             Debug.Assert(_length == index);
